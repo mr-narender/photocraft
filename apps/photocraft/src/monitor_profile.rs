@@ -294,8 +294,8 @@ mod linux {
             return None;
         }
         bytes.truncate(declared);
-        let profile = photocraft_cms::Profile::parse(&bytes).ok()?;
-        (profile.color_space == photocraft_cms::ColorSpace::Rgb).then_some(bytes)
+        let profile = craft_cms::Profile::parse(&bytes).ok()?;
+        (profile.color_space == craft_cms::ColorSpace::Rgb).then_some(bytes)
     }
 
     fn unambiguous_clone_profile(output_names: &[String], profiles: &HashMap<String, Vec<IccProfile>>) -> Option<IccProfile> {
@@ -320,11 +320,11 @@ mod linux {
 
         #[test]
         fn checked_icc_bytes_require_a_bounded_parseable_rgb_profile() {
-            let rgb = photocraft_cms::Builtin::Srgb.profile().to_bytes();
+            let rgb = craft_cms::Builtin::Srgb.profile().to_bytes();
             let bytes = rgb.as_ref().clone();
             assert_eq!(checked_icc_bytes(bytes.clone()), Some(bytes));
 
-            let cmyk = photocraft_cms::Builtin::CoatedCmyk.profile().to_bytes();
+            let cmyk = craft_cms::Builtin::CoatedCmyk.profile().to_bytes();
             assert!(checked_icc_bytes(cmyk.as_ref().clone()).is_none());
             assert!(checked_icc_bytes(vec![0; 132]).is_none());
             assert!(checked_icc_bytes(vec![0; MAX_ICC_BYTES + 1]).is_none());
@@ -332,8 +332,8 @@ mod linux {
 
         #[test]
         fn cloned_outputs_use_only_one_unambiguous_profile() {
-            let srgb = photocraft_cms::Builtin::Srgb.profile().to_bytes();
-            let p3 = photocraft_cms::Builtin::DisplayP3.profile().to_bytes();
+            let srgb = craft_cms::Builtin::Srgb.profile().to_bytes();
+            let p3 = craft_cms::Builtin::DisplayP3.profile().to_bytes();
             let profile = |name: &str, bytes: std::sync::Arc<Vec<u8>>| IccProfile { name: name.into(), bytes };
             let outputs = ["DP-1".to_owned(), "HDMI-1".to_owned()];
 
@@ -495,6 +495,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_hung_helper_is_stopped_and_big_replies_dont_block() {
+        let _spawns = crate::CHILD_SPAWNS.read().unwrap_or_else(std::sync::PoisonError::into_inner);
         let t0 = std::time::Instant::now();
         let e = run_helper(std::process::Command::new("sleep").arg("30"), std::time::Duration::from_millis(300)).unwrap_err();
         assert!(e.contains("took longer than"), "{e}");
