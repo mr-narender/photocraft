@@ -1,43 +1,45 @@
-//! The Layers panel New Layer button: a click makes a layer at once, ⌥-click opens the New Layer
-//! dialog first, as in Photoshop.
+//! The New Layer shortcut: ⇧⌘N asks first, ⌥⇧⌘N makes the layer at once (#4794).
 
+use craft::ui::dialog::StackDialog as _;
+use craft::ui::patterns::form_dialogs::HostedParamDialog;
 use egui::Modifiers;
-use egui_kittest::kittest::Queryable;
 use serde_json::json;
 
 use crate::PhotocraftApp;
 
-fn panel() -> egui_kittest::Harness<'static, PhotocraftApp> {
+fn panel() -> egui_kittest::Harness<'static, Box<PhotocraftApp>> {
     let mut s = photocraft_engine::Session::new();
     s.execute("file.new", json!({"width": 8, "height": 8})).unwrap();
     let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(1200.0, 800.0)).with_max_steps(64).build_eframe(|cc| {
         PhotocraftApp::setup_context(&cc.egui_ctx, Default::default());
-        PhotocraftApp::new(s, crate::Services::default())
+        PhotocraftApp::with_context(cc.egui_ctx.clone(), s, crate::Services::default())
     });
     h.run_steps(4);
     h
 }
 
-fn layers(h: &egui_kittest::Harness<'static, PhotocraftApp>) -> usize {
+fn layers(h: &egui_kittest::Harness<'static, Box<PhotocraftApp>>) -> usize {
     h.state().session.active().unwrap().doc.layers.len()
 }
 
-#[test]
-fn click_makes_a_layer_without_asking() {
-    let mut h = panel();
-    h.get_by_label("Create a new layer").click();
-    h.run_steps(4);
-    assert_eq!(layers(&h), 2);
-    assert!(!h.state().ui.dialogs.iter().any(|d| crate::new_layer_ui::owns(&d.fields)));
+fn dialog_open(h: &egui_kittest::Harness<'static, Box<PhotocraftApp>>) -> bool {
+    h.state().framework.dialogs.get::<HostedParamDialog>().is_some_and(|d| d.key().is_some_and(crate::new_layer_ui::owns))
 }
 
 #[test]
-fn alt_click_opens_the_new_layer_dialog() {
+fn shortcut_asks_first_and_alt_shortcut_makes_a_layer_at_once() {
     let mut h = panel();
-    h.get_by_label("Create a new layer").click_modifiers(Modifiers::ALT);
+    h.key_press_modifiers(Modifiers::COMMAND | Modifiers::SHIFT, egui::Key::N);
     h.run_steps(4);
-    assert_eq!(layers(&h), 1, "nothing made until OK");
-    let id = h.state().ui.dialogs.iter().find(|d| crate::new_layer_ui::owns(&d.fields)).map(|d| d.id).expect("the New Layer dialog");
-    crate::dialogs::confirm(h.state_mut(), id).unwrap();
-    assert_eq!(layers(&h), 2);
+    assert_eq!(layers(&h), 1, "⇧⌘N asks first");
+    assert!(dialog_open(&h), "the New Layer dialog");
+
+    let mut h = panel();
+    h.key_press_modifiers(Modifiers::COMMAND | Modifiers::SHIFT | Modifiers::ALT, egui::Key::N);
+    h.run_steps(4);
+    assert_eq!(layers(&h), 2, "⌥⇧⌘N makes the layer");
+    assert!(!dialog_open(&h));
+    h.key_press_modifiers(Modifiers::COMMAND | Modifiers::SHIFT | Modifiers::ALT, egui::Key::N);
+    h.run_steps(4);
+    assert_eq!(layers(&h), 3, "once per press");
 }
