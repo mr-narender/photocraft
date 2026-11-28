@@ -855,20 +855,23 @@ fn wet_edges_and_noise() {
     let hb = BrushSettings { hardness: 1.0, ..b };
     let d = paint(&hb, &[StrokePoint::new(50.0, 50.0, 1.0)], 100, 100);
     assert!(d.rgba(50 + 18, 50)[3] > d.rgba(50, 50)[3] + 0.2);
-    // Noise: soft tip coverage becomes grainy (more pixels near 0/1).
+    // Noise: soft coverage gets a light grain, not the old near-binary dither.
     let soft = BrushSettings { size: 40.0, hardness: 0.0, ..brush() };
     let a = paint(&soft, &[StrokePoint::new(50.0, 50.0, 1.0)], 100, 100);
     let n = paint(&BrushSettings { noise: true, ..soft }, &[StrokePoint::new(50.0, 50.0, 1.0)], 100, 100);
-    let extreme = |s: &Surface| {
-        (30..70)
-            .flat_map(|y| (30..70).map(move |x| (x, y)))
-            .filter(|&(x, y)| {
-                let v = s.rgba(x, y)[3];
-                !(0.15..=0.85).contains(&v)
-            })
-            .count()
-    };
-    assert!(extreme(&n) > extreme(&a) + 100, "{} vs {}", extreme(&n), extreme(&a));
+    let (mut sum, mut squares, mut count) = (0.0, 0.0, 0usize);
+    for y in 30..70 {
+        for x in 30..70 {
+            let delta = 255.0 * f64::from(a.rgba(x, y)[3] - n.rgba(x, y)[3]);
+            sum += delta;
+            squares += delta * delta;
+            count += 1;
+        }
+    }
+    let mean = sum / count as f64;
+    let deviation = (squares / count as f64 - mean * mean).max(0.0).sqrt();
+    assert!(mean.abs() <= 2.0, "Noise mean {mean}");
+    assert!((10.0..=20.0).contains(&deviation), "Noise std {deviation}");
 }
 
 #[test]

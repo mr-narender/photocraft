@@ -1672,9 +1672,10 @@ impl GeneralTip<'_> {
                 continue;
             }
             if noise && val < 1.0 {
-                let n = hash2(x, y, NOISE_SALT);
+                let n = hash2(x, y, NOISE_SALT ^ b.seed);
                 let hard = if n < val { 1.0 } else { 0.0 };
-                val += (hard - val) * 0.7;
+                // A light unbiased grain, rather than near-binary dither. Solid pixels skip this.
+                val += (hard - val) * 0.15;
             }
             if tex_tip {
                 val = texture_combine(b.texture.mode, val, ctx.texture_at(x, y), d.depth);
