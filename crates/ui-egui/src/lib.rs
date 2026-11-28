@@ -1018,6 +1018,9 @@ mod warp_text_dialog_tests;
 mod options_bar_mode_wheel_tests;
 
 #[cfg(test)]
+mod options_bar_percent_arrow_repeat_tests;
+
+#[cfg(test)]
 mod field_wheel_app_tests;
 
 #[cfg(test)]
