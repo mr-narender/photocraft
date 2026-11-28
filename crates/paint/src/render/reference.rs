@@ -110,9 +110,9 @@ impl BrushContext {
                     continue;
                 }
                 if noise && val < 1.0 {
-                    let n = hash2(x, y, NOISE_SALT);
+                    let n = hash2(x, y, NOISE_SALT ^ b.seed);
                     let hard = if n < val { 1.0 } else { 0.0 };
-                    val += (hard - val) * 0.7;
+                    val += (hard - val) * 0.15;
                 }
                 if tex_tip {
                     val = mask_combine(b.texture.mode, val, self.texture_at(x, y), d.depth);
