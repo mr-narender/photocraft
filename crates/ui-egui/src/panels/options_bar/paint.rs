@@ -177,14 +177,18 @@ fn apply_values(app: &mut PhotocraftApp, tool: Tool, brush: &mut BrushSettings, 
     // PLAN: PaintBar's Opacity and Flow fields range over 0..=100, so a typed 0 on the Eraser reports no
     // `out_of_range` and shows no alert (the old bar's range started at 1); pn.C18's owner decides the range.
     const MIN_FRACTION: f32 = 0.01;
-    brush.opacity = (after.opacity as f32).max(MIN_FRACTION);
-    if tool != Tool::MixerBrush {
+    // The bar shows the fractions rounded (`fraction`), so an untouched one is left as the brush
+    // holds it rather than written back rounded.
+    if after.opacity != before.opacity {
+        brush.opacity = (after.opacity as f32).max(MIN_FRACTION);
+    }
+    if tool != Tool::MixerBrush && after.flow != before.flow {
         brush.flow = (after.flow as f32).max(MIN_FRACTION);
     }
     if after.smoothing.amount != before.smoothing.amount {
         brush.smoothing.enabled = true;
+        brush.smoothing.amount = after.smoothing.amount as f32;
     }
-    brush.smoothing.amount = after.smoothing.amount as f32;
     brush.smoothing.pulled_string = after.smoothing.pulled_string;
     brush.smoothing.catch_up = after.smoothing.catch_up;
     brush.smoothing.catch_up_on_end = after.smoothing.catch_up_on_end;
@@ -195,10 +199,16 @@ fn apply_values(app: &mut PhotocraftApp, tool: Tool, brush: &mut BrushSettings, 
     let m = &mut brush.mixer;
     m.load_after_stroke = after.mixer.load_after_stroke;
     m.clean_after_stroke = after.mixer.clean_after_stroke;
-    m.wet = after.mixer.wet as f32;
-    m.load = after.mixer.load as f32;
-    m.mix = after.mixer.mix as f32;
-    m.flow = after.mixer.flow as f32;
+    for (field, was, now) in [
+        (&mut m.wet, before.mixer.wet, after.mixer.wet),
+        (&mut m.load, before.mixer.load, after.mixer.load),
+        (&mut m.mix, before.mixer.mix, after.mixer.mix),
+        (&mut m.flow, before.mixer.flow, after.mixer.flow),
+    ] {
+        if now != was {
+            *field = now as f32;
+        }
+    }
     m.sample_all_layers = after.mixer.sample_all_layers;
     m.solid_colors_only = after.mixer.solid_colors_only;
     let o = &mut app.ui.tool_options;
@@ -365,6 +375,41 @@ mod mixer_blend_combination_tests;
 #[cfg(test)]
 #[path = "../../mixer_load_solid_colors_tests.rs"]
 mod mixer_load_solid_colors_tests;
+
+#[cfg(test)]
+mod apply_values_tests {
+    use super::{apply_values, paint_values};
+    use crate::PhotocraftApp;
+    use crate::state::Tool;
+
+    /// An edit of an unrelated control (Pressure for Size) leaves the brush's fractions exactly as
+    /// they were, not rounded to the six decimals the bar shows them with.
+    #[test]
+    fn an_unrelated_edit_keeps_the_untouched_fractions_exact() {
+        for tool in [Tool::Brush, Tool::MixerBrush] {
+            let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), crate::Services::default());
+            let mut brush = (*app.session.tools.brush).clone();
+            let odd = 0.123_456_78_f32;
+            brush.opacity = odd;
+            brush.flow = odd;
+            brush.smoothing.amount = odd;
+            brush.mixer.wet = odd;
+            brush.mixer.load = odd;
+            brush.mixer.mix = odd;
+            brush.mixer.flow = odd;
+            let before = paint_values(&app, tool, &brush);
+            let mut after = before.clone();
+            after.pressure_size = !after.pressure_size;
+            let kept = brush.clone();
+            apply_values(&mut app, tool, &mut brush, &before, &after);
+            assert_eq!(brush.pressure_size, after.pressure_size, "{tool:?}: the edit lands");
+            let fractions =
+                |b: &super::BrushSettings| [b.opacity, b.flow, b.smoothing.amount, b.mixer.wet, b.mixer.load, b.mixer.mix, b.mixer.flow].map(f32::to_bits);
+            assert_eq!(fractions(&brush), fractions(&kept), "{tool:?}: untouched fractions stay exact");
+            assert_eq!(brush.smoothing.enabled, kept.smoothing.enabled, "{tool:?}: smoothing stays as it was");
+        }
+    }
+}
 
 #[cfg(test)]
 mod mixer_load_image_tests {
