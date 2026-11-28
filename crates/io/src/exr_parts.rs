@@ -3,7 +3,7 @@
 //! file listed for a chooser ([`entries`]), and the chosen ones imported as the layers of
 //! one document ([`import`]), with an optional additive beauty precomp from the AOVs.
 
-use photocraft_cms::Builtin;
+use craft_cms::Builtin;
 use photocraft_codecs::{self as codecs, ChannelLayout, DecodeOptions, Image, SampleType};
 use photocraft_color::{ColorMode, SampleType as DocSample};
 use photocraft_doc::{Document, Layer, LayerContent, Size};
@@ -98,6 +98,12 @@ fn channel_base_split(name: &str) -> Option<(&str, &str)> {
     (!prefix.is_empty()).then_some((prefix, base))
 }
 
+/// The name a part is listed, selected and imported as: its `name` attribute, or
+/// `part <index>` when it has none (a single-part render usually carries no name).
+fn part_display_name(part: &codecs::ExrPartInfo) -> String {
+    part.name.clone().unwrap_or_else(|| format!("part {}", part.index))
+}
+
 /// Lists the entries of a multi-part or channel-grouped EXR for a chooser: flat parts in
 /// file order, then the channel groups, then the Cryptomatte layers as information. A file
 /// whose parts are all deep is refused (the deep decoder composites those).
@@ -113,7 +119,7 @@ pub fn entries(bytes: &[u8]) -> Result<Vec<Entry>, IoError> {
         }
         out.push(Entry {
             kind: EntryKind::Part,
-            name: part.name.clone().unwrap_or_else(|| format!("part {}", part.index)),
+            name: part_display_name(part),
             view: part.view.clone(),
             width: part.width,
             height: part.height,
@@ -159,23 +165,19 @@ pub struct Selection {
     pub precomp: bool,
 }
 
-/// An image as an importable layer: F16 becomes F32 (lossless, warned once by the caller),
-/// the layout matches the document's, the surface is built a band of rows at a time. The
-/// returned mode tells the caller whether this layer is grayscale.
-fn layer_surface(img: &Image, max: &mut (u32, u32)) -> Result<(Surface, ColorMode), IoError> {
-    let (layout, mode) = if matches!(img.layout(), ChannelLayout::Gray | ChannelLayout::GrayA) {
-        (ChannelLayout::GrayA, ColorMode::Grayscale)
-    } else {
-        (ChannelLayout::Rgba, ColorMode::Rgb)
-    };
+/// An image as an importable layer: F16 becomes F32 (lossless, warned once by the caller), the
+/// layout is RGBA (a gray part or group fills R, G and B alike, as every EXR opens as RGB,
+/// #14069), the surface is built a band of rows at a time.
+fn layer_surface(img: &Image, max: &mut (u32, u32)) -> Result<Surface, IoError> {
     max.0 = max.0.max(img.width());
     max.1 = max.1.max(img.height());
-    let converted = img.convert(layout, SampleType::F32);
-    image_surface(&converted, layout, SampleType::F32).map(|s| (s, mode))
+    let converted = img.convert(ChannelLayout::Rgba, SampleType::F32);
+    image_surface(&converted, ChannelLayout::Rgba, SampleType::F32)
 }
 
 /// Imports the chosen entries as the layers of one document: parts whole, groups from their
-/// own channels, F16 kept losslessly as F32, the linear-light EXR values tagged linear sRGB.
+/// own channels, F16 kept losslessly as F32, the document RGB and the linear-light EXR values
+/// tagged linear sRGB.
 /// `precomp` adds the additive sum of the file's AOV groups as a top layer and fails,
 /// naming the missing AOVs, when the light-path set is incomplete.
 pub fn import(name: &str, bytes: &[u8], sel: &Selection) -> Result<ImportResult, IoError> {
@@ -186,8 +188,14 @@ pub fn import(name: &str, bytes: &[u8], sel: &Selection) -> Result<ImportResult,
     }
     let all_groups = groups(bytes)?;
     let view_passes = |view: &Option<String>| view.as_ref().is_none_or(|v| sel.view.eq_ignore_ascii_case("both") || v.eq_ignore_ascii_case(&sel.view));
-    let part_by_name =
-        |want: &str| info.iter().find(|p| !p.deep && p.name.as_deref() == Some(want)).ok_or_else(|| IoError::Unsupported(format!("no flat part named {want}")));
+    // A named part wins over an unnamed one listed under the same fallback name ("part 0").
+    let part_by_name = |want: &str| {
+        let flat = || info.iter().filter(|p| !p.deep);
+        flat()
+            .find(|p| p.name.as_deref() == Some(want))
+            .or_else(|| flat().find(|p| p.name.is_none() && part_display_name(p) == want))
+            .ok_or_else(|| IoError::Unsupported(format!("no flat part named {want}")))
+    };
     let mut chosen_parts: Vec<&codecs::ExrPartInfo> = Vec::new();
     for want in &sel.parts {
         let p = part_by_name(want)?;
@@ -213,29 +221,20 @@ pub fn import(name: &str, bytes: &[u8], sel: &Selection) -> Result<ImportResult,
         return Err(IoError::Unsupported("no parts or groups selected".into()));
     }
 
-    // Decode each needed whole part once; groups come from their part's named channels.
-    let mut part_pixels: Vec<Option<Image>> = vec![None; info.len()];
+    // Each chosen part (deduplicated above) decodes once; groups come from their part's named
+    // channels.
     let mut layers: Vec<Layer> = Vec::new();
     let mut warnings: Vec<String> = Vec::new();
-    let mut gray_only = true;
     let mut max = (1u32, 1u32);
     let mut f16_seen = false;
 
     for part in &chosen_parts {
-        let img = match &part_pixels[part.index] {
-            Some(img) => img.clone(),
-            None => {
-                let img = codecs::decode_exr_part(bytes, part.index, &opts)?;
-                part_pixels[part.index] = Some(img.clone());
-                img
-            }
-        };
+        let img = codecs::decode_exr_part(bytes, part.index, &opts)?;
         if img.sample_type() == SampleType::F16 {
             f16_seen = true;
         }
-        let (surface, mode) = layer_surface(&img, &mut max)?;
-        gray_only &= mode == ColorMode::Grayscale;
-        layers.push(Layer::new(part.name.clone().unwrap_or_else(|| format!("part {}", part.index)), LayerContent::Raster(surface)));
+        let surface = layer_surface(&img, &mut max)?;
+        layers.push(Layer::new(part_display_name(part), LayerContent::Raster(surface)));
     }
     for group in &chosen_groups {
         let mut names = group.channels.clone();
@@ -245,14 +244,12 @@ pub fn import(name: &str, bytes: &[u8], sel: &Selection) -> Result<ImportResult,
         if img.sample_type() == SampleType::F16 {
             f16_seen = true;
         }
-        let (surface, mode) = layer_surface(&img, &mut max)?;
-        gray_only &= mode == ColorMode::Grayscale;
+        let surface = layer_surface(&img, &mut max)?;
         layers.push(Layer::new(group.prefix.clone(), LayerContent::Raster(surface)));
     }
 
     if sel.precomp {
         let layer = precomp_layer(bytes, &all_groups, &opts, &mut max, &mut warnings)?;
-        gray_only = false; // the precomp is an RGB layer by construction
         layers.push(layer);
     }
 
@@ -262,13 +259,10 @@ pub fn import(name: &str, bytes: &[u8], sel: &Selection) -> Result<ImportResult,
     if f16_seen {
         warnings.push("16-bit float samples are stored as 32-bit float".to_string());
     }
-    let mode = if gray_only { ColorMode::Grayscale } else { ColorMode::Rgb };
-    let mut doc = Document::new(name, Size::new(max.0, max.1), mode, DocSample::F32);
-    doc.layers = layers;
-    if mode == ColorMode::Rgb {
-        // OpenEXR holds linear, scene-referred values: tag them linear sRGB, as File › Open does.
-        doc.icc_profile = Some(Builtin::LinearSrgb.profile().to_bytes());
-    }
+    let mut doc = Document::new(name, Size::new(max.0, max.1), ColorMode::Rgb, DocSample::F32);
+    doc.layers = layers.into();
+    // OpenEXR holds linear, scene-referred values: tag them linear sRGB, as File › Open does.
+    doc.icc_profile = Some(Builtin::LinearSrgb.profile().to_bytes());
     Ok(ImportResult { document: doc, warnings, source_read_only: false, preview_only: false })
 }
 
@@ -329,7 +323,7 @@ fn precomp_layer(bytes: &[u8], all_groups: &[Group], opts: &DecodeOptions, max: 
     let img = Image::from_f32(w, h, ChannelLayout::Rgba, &out)?;
     max.0 = max.0.max(w);
     max.1 = max.1.max(h);
-    let (surface, _) = layer_surface(&img, max)?;
+    let surface = layer_surface(&img, max)?;
     warnings.push("beauty (precomp) is the additive sum of the file's AOVs; alpha is the maximum coverage".to_string());
     Ok(Layer::new("beauty (precomp)", LayerContent::Raster(surface)))
 }

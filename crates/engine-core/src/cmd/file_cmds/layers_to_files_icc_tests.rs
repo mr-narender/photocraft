@@ -1,0 +1,268 @@
+//! Layers to Files: Include ICC Profile (#13973). `iccProfile: false` writes no profile in PNG,
+//! JPEG, TIFF or PSD files; `true` embeds the document's profile (a CMYK document's JPEG its CMYK
+//! profile, its PNG none); unset keeps what the export wrote before.
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+use super::*;
+use crate::color_cmds::ColorExt;
+
+fn session(mode: &str, depth: u32) -> Session {
+    let mut s = crate::session();
+    s.execute("file.new", json!({"width": 8, "height": 6, "mode": mode, "depth": depth, "background": "backgroundColor", "backgroundColor": [0.8, 0.1, 0.1]}))
+        .unwrap();
+    // One normal layer: Layers to Files refuses a Background-only document (#13968).
+    s.execute("layer.new.layerFromBackground", json!({})).unwrap();
+    s
+}
+
+/// The colour space of each written file's embedded profile (`None`: no profile), by extension.
+fn profiles(s: &mut Session, format: &str, extra: Value) -> Vec<(String, Option<String>)> {
+    let dir = tempfile::tempdir().unwrap();
+    let mut p = json!({"dir": dir.path().to_string_lossy(), "prefix": "t", "format": format});
+    for (k, v) in extra.as_object().unwrap() {
+        p[k] = v.clone();
+    }
+    let r = s.execute("file.export.layersToFiles", p).unwrap();
+    r["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| {
+            let path = f.as_str().unwrap();
+            let bytes = std::fs::read(path).unwrap();
+            let doc = photocraft_io::import(path, &bytes).unwrap().document;
+            let space = doc.icc_profile.map(|icc| String::from_utf8_lossy(icc.get(16..20).unwrap()).trim().to_string());
+            (format!("{:?}", doc.mode), space)
+        })
+        .collect()
+}
+
+const FORMATS: [&str; 4] = ["png", "jpg", "tif", "psd"];
+
+/// RGB and CMYK documents at 8 and 16 bits.
+const DOCS: [(&str, u32); 4] = [("rgb", 8), ("rgb", 16), ("cmyk", 8), ("cmyk", 16)];
+
+fn one(s: &mut Session, format: &str, extra: Value) -> (String, Option<String>) {
+    let files = profiles(s, format, extra);
+    assert_eq!(files.len(), 1, "{format}: one layer, one file");
+    files.into_iter().next().unwrap()
+}
+
+#[test]
+fn off_writes_no_profile() {
+    for (mode, depth) in DOCS {
+        let mut s = session(mode, depth);
+        for format in FORMATS {
+            assert_eq!(one(&mut s, format, json!({"iccProfile": false})).1, None, "{mode}{depth} {format}");
+        }
+    }
+}
+
+#[test]
+fn on_embeds_the_documents_profile() {
+    for depth in [8, 16] {
+        let mut s = session("rgb", depth);
+        for format in FORMATS {
+            assert_eq!(one(&mut s, format, json!({"iccProfile": true})), ("Rgb".into(), Some("RGB".into())), "rgb{depth} {format}");
+        }
+    }
+    // The document's own profile, not a stand-in, when it has one.
+    let mut s = session("rgb", 8);
+    let own = crate::color_cmds::working_profile(ColorMode::Rgb).to_bytes();
+    let dir = tempfile::tempdir().unwrap();
+    let r = s.execute("file.export.layersToFiles", json!({"dir": dir.path().to_string_lossy(), "format": "jpg", "iccProfile": true})).unwrap();
+    let path = r["files"][0].as_str().unwrap();
+    let embedded = photocraft_io::import(path, &std::fs::read(path).unwrap()).unwrap().document.icc_profile;
+    assert_eq!(embedded.as_deref(), Some(&*own));
+}
+
+#[test]
+fn a_cmyk_documents_jpeg_keeps_its_cmyk_profile_and_its_png_has_none() {
+    for depth in [8, 16] {
+        let mut s = session("cmyk", depth);
+        let on = json!({"iccProfile": true});
+        assert_eq!(one(&mut s, "jpg", on.clone()), ("Cmyk".into(), Some("CMYK".into())), "cmyk{depth} jpg");
+        assert_eq!(one(&mut s, "tif", on.clone()), ("Cmyk".into(), Some("CMYK".into())), "cmyk{depth} tif");
+        assert_eq!(one(&mut s, "psd", on.clone()), ("Cmyk".into(), Some("CMYK".into())), "cmyk{depth} psd");
+        assert_eq!(one(&mut s, "png", on), ("Rgb".into(), None), "cmyk{depth} png");
+    }
+}
+
+#[test]
+fn unset_keeps_what_the_export_wrote_before() {
+    // As main wrote them before the param: flat RGB files and a CMYK document's PNG carry the
+    // RGB working profile; PSD files and CMYK JPEG and TIFF files carry none.
+    let rgb = Some("RGB".to_string());
+    for depth in [8, 16] {
+        let mut s = session("rgb", depth);
+        let got: Vec<_> = FORMATS.iter().map(|f| one(&mut s, f, json!({})).1).collect();
+        assert_eq!(got, vec![rgb.clone(), rgb.clone(), rgb.clone(), None], "rgb{depth}");
+        let mut s = session("cmyk", depth);
+        let got: Vec<_> = FORMATS.iter().map(|f| one(&mut s, f, json!({})).1).collect();
+        assert_eq!(got, vec![rgb.clone(), None, None, None], "cmyk{depth}");
+        // `null` is unset too.
+        assert_eq!(one(&mut s, "png", json!({"iccProfile": null})).1, rgb, "cmyk{depth} null");
+    }
+}
+
+#[test]
+fn a_bad_value_is_an_error_and_writes_nothing() {
+    let mut s = session("rgb", 8);
+    for bad in [json!("no"), json!(0), json!([false]), json!({})] {
+        let dir = tempfile::tempdir().unwrap();
+        let r = s.execute("file.export.layersToFiles", json!({"dir": dir.path().to_string_lossy(), "format": "png", "iccProfile": bad}));
+        assert!(matches!(r, Err(EngineError::BadParams { .. })), "{bad}: {r:?}");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0, "{bad}: nothing written");
+    }
+    assert_eq!(s.active().unwrap().doc.icc_profile, None, "the document is untouched");
+}
+
+/// The pixels of each written file, decoded (RGBA, 0..1), and whether it carries a profile.
+fn pixels(s: &mut Session, format: &str, extra: Value) -> Vec<(Vec<[f32; 4]>, bool)> {
+    let dir = tempfile::tempdir().unwrap();
+    let mut p = json!({"dir": dir.path().to_string_lossy(), "prefix": "t", "format": format});
+    for (k, v) in extra.as_object().unwrap() {
+        p[k] = v.clone();
+    }
+    let r = s.execute("file.export.layersToFiles", p).unwrap();
+    r["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| {
+            let path = f.as_str().unwrap();
+            let doc = photocraft_io::import(path, &std::fs::read(path).unwrap()).unwrap().document;
+            let icc = doc.icc_profile.is_some();
+            (photocraft_compose::flatten(&doc).px.to_vec(), icc)
+        })
+        .collect()
+}
+
+#[test]
+fn off_keeps_a_cmyk_documents_own_profile_for_its_colours() {
+    // A CMYK document tagged with a profile other than the built-in coated one, whose layer
+    // needs compositing (50 % opacity): its colours are converted through its own profile
+    // whether or not the file carries it (CodeRabbit on #16653).
+    for depth in [8, 16] {
+        let mut s = session("cmyk", depth);
+        s.execute("edit.assignProfile", json!({"profile": "coated-fogra39"})).unwrap();
+        s.execute("layer.setProps", json!({"opacity": 0.5})).unwrap();
+        let on = pixels(&mut s, "png", json!({"iccProfile": true}));
+        let off = pixels(&mut s, "png", json!({"iccProfile": false}));
+        let unset = pixels(&mut s, "png", json!({}));
+        assert_eq!(off[0].0, on[0].0, "cmyk{depth}: the same pixels with iccProfile false and true");
+        assert_eq!(off[0].0, unset[0].0, "cmyk{depth}: the same pixels with iccProfile false and unset");
+        for format in FORMATS {
+            assert!(pixels(&mut s, format, json!({"iccProfile": false})).iter().all(|(_, icc)| !icc), "cmyk{depth} {format}: no profile");
+        }
+        let layered = pixels(&mut s, "tif", json!({"iccProfile": false, "tiffLayers": true}));
+        assert!(layered.iter().all(|(_, icc)| !icc), "cmyk{depth} layered tif: no profile");
+        assert!(s.active().unwrap().doc.icc_profile.is_some(), "the document keeps its profile");
+    }
+}
+
+/// An Indexed Color document with an RGB profile: `iccProfile: false` writes no profile in any file,
+/// the PSD included, which is written over its colour table (CodeRabbit on #16653), and the
+/// layered TIFF; `true` keeps it in the PSD.
+#[test]
+fn an_indexed_documents_files_follow_the_setting() {
+    let mut s = session("rgb", 8);
+    s.execute("edit.assignProfile", json!({"profile": "adobe-rgb-compat"})).unwrap();
+    s.execute("image.mode.indexedColor", json!({"palette": "exact", "forced": "none", "dither": "none", "transparency": false})).unwrap();
+    // The conversion flattens: a normal layer again (#13968).
+    s.execute("layer.new.layerFromBackground", json!({})).unwrap();
+    let doc = &s.active().unwrap().doc;
+    assert_eq!(doc.mode, ColorMode::Indexed);
+    assert!(doc.icc_profile.is_some(), "the document keeps its profile");
+    assert!(doc.layers.iter().any(|l| !doc.is_background(l.id)), "a layer to export");
+    for format in ["png", "jpg", "tif", "psd", "bmp"] {
+        assert!(profiles(&mut s, format, json!({"iccProfile": false})).iter().all(|(_, icc)| icc.is_none()), "indexed {format}: no profile");
+    }
+    let layered = profiles(&mut s, "tif", json!({"iccProfile": false, "tiffLayers": true}));
+    assert!(layered.iter().all(|(_, icc)| icc.is_none()), "indexed layered tif: no profile");
+    assert_eq!(one(&mut s, "psd", json!({"iccProfile": true})).1, Some("RGB".into()), "indexed psd: the profile");
+}
+
+/// #17199: Include ICC describes an untagged layer in the session's working space,
+/// without assigning that profile to the source document or changing its samples.
+#[test]
+fn include_icc_uses_the_working_space_only_for_untagged_layers() {
+    let export_profile = |s: &mut Session| {
+        let dir = tempfile::tempdir().unwrap();
+        let out = s.execute("file.export.layersToFiles", json!({"dir": dir.path().to_string_lossy(), "format": "png", "iccProfile": true})).unwrap();
+        let files = out["files"].as_array().unwrap();
+        assert_eq!(files.len(), 1);
+        let bytes = std::fs::read(files[0].as_str().unwrap()).unwrap();
+        photocraft_codecs::decode(&bytes).unwrap().icc.unwrap()
+    };
+    for (mode, key, working, tagged) in [("rgb", "workingRgb", "prophoto-compat", "display-p3"), ("grayscale", "workingGray", "gray-gamma-2.2", "sgray")] {
+        let mut s = session(mode, 8);
+        s.execute("edit.assignProfile", json!({"profile": "none"})).unwrap();
+        let mut settings = json!({});
+        settings[key] = json!(working);
+        s.execute("edit.colorSettings", settings).unwrap();
+        let original = s.active().unwrap().doc.clone();
+        assert!(original.icc_profile.is_none());
+        let samples = photocraft_compose::flatten(&original).px.to_vec();
+        let expected = s.color().working(original.mode).to_bytes();
+        assert_ne!(expected, crate::color_cmds::working_profile(original.mode).to_bytes(), "{mode}: the nondefault profile must distinguish the old fallback");
+        assert_eq!(export_profile(&mut s).as_slice(), expected.as_slice(), "{mode}");
+        assert!(s.active().unwrap().doc.icc_profile.is_none());
+        assert_eq!(photocraft_compose::flatten(&s.active().unwrap().doc).px.to_vec(), samples);
+
+        s.execute("edit.assignProfile", json!({"profile": tagged})).unwrap();
+        let own = s.active().unwrap().doc.icc_profile.clone().unwrap();
+        assert_ne!(own, expected);
+        assert_eq!(export_profile(&mut s).as_slice(), own.as_slice(), "{mode}: a tag wins over the working space");
+        assert_eq!(s.active().unwrap().doc.icc_profile.as_deref(), Some(own.as_ref()));
+        assert_eq!(photocraft_compose::flatten(&s.active().unwrap().doc).px.to_vec(), samples);
+    }
+    let mut s = session("rgb", 8);
+    s.execute("edit.assignProfile", json!({"profile": "none"})).unwrap();
+    s.execute("edit.colorSettings", json!({"workingRgb": "prophoto-compat"})).unwrap();
+    let expected = s.color().working(ColorMode::Rgb).to_bytes();
+
+    // An export may be authorized while a stored working-profile path is not. The inherited
+    // job gate must run before resolving that path, including APIs without Session::execute.
+    fn deny_profile_path(id: &str, params: &Value) -> crate::Result<()> {
+        if id == "edit.profileInfo" && params.get("profile").and_then(Value::as_str).is_some_and(|p| p.ends_with("blocked-working.icc")) {
+            return Err(EngineError::Other("denied working ICC read 17199".into()));
+        }
+        Ok(())
+    }
+    let profile_dir = tempfile::tempdir().unwrap();
+    let profile_path = profile_dir.path().join("blocked-working.icc");
+    std::fs::write(&profile_path, expected.as_slice()).unwrap();
+    s.execute("edit.colorSettings", json!({"workingRgb": profile_path.to_string_lossy()})).unwrap();
+    let _authorization = crate::jobs::render_authorization_scope(Some(deny_profile_path));
+
+    s.execute("select.rect", json!({"x": 0, "y": 0, "width": 2, "height": 2})).unwrap();
+    s.execute("select.float", json!({"dx": 2})).unwrap();
+    assert!(crate::float_cmds::floating(s.active().unwrap()).is_some());
+    let document = s.active().unwrap().doc.clone();
+    let revision = s.active().unwrap().revision;
+    let history = s.active().unwrap().history.entries();
+
+    let mut writes = 0;
+    let error = export_layers_report_with(&s, &json!({"format": "png", "iccProfile": true}), |_, _| {
+        writes += 1;
+        Ok(())
+    })
+    .unwrap_err();
+    assert!(error.to_string().contains("denied working ICC read 17199"));
+    assert_eq!(writes, 0, "a rejected implicit profile read must not produce a layer file");
+    assert!(s.active().unwrap().doc.icc_profile.is_none());
+    assert!(crate::float_cmds::floating(s.active().unwrap()).is_some(), "a denied profile read leaves the move floating");
+    assert!(std::sync::Arc::ptr_eq(&s.active().unwrap().doc, &document));
+    assert_eq!(s.active().unwrap().revision, revision);
+    assert_eq!(s.active().unwrap().history.entries(), history, "no History step is added");
+
+    let output = tempfile::tempdir().unwrap();
+    let error = s.execute("file.export.layersToFiles", json!({"dir": output.path().to_string_lossy(), "format": "png", "iccProfile": true})).unwrap_err();
+    assert!(error.to_string().contains("denied working ICC read 17199"));
+    assert_eq!(std::fs::read_dir(output.path()).unwrap().count(), 0);
+    assert!(crate::float_cmds::floating(s.active().unwrap()).is_some(), "a denied profile read leaves the move floating");
+    assert!(std::sync::Arc::ptr_eq(&s.active().unwrap().doc, &document));
+    assert_eq!(s.active().unwrap().revision, revision);
+    assert_eq!(s.active().unwrap().history.entries(), history, "no History step is added");
+}
