@@ -8,14 +8,7 @@ use crate::{BrushSettings, StrokePoint, render_stroke};
 fn paint(noise: bool, hardness: f32, seed: u64) -> Surface {
     let brush = BrushSettings { size: 60.0, hardness, noise, seed, ..BrushSettings::default() };
     let mut surface = Surface::new(PixelFormat::RGBA32F);
-    render_stroke(
-        &mut surface,
-        &brush,
-        &[StrokePoint::new(100.0, 100.0, 1.0), StrokePoint::new(400.0, 100.0, 1.0)],
-        None,
-        false,
-        1.0,
-    );
+    render_stroke(&mut surface, &brush, &[StrokePoint::new(100.0, 100.0, 1.0), StrokePoint::new(400.0, 100.0, 1.0)], None, false, 1.0);
     surface
 }
 
