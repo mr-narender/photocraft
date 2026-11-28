@@ -187,14 +187,6 @@
           "hash": "487390be64dd83ce33912f980c863775"
         },
         {
-          "key": "AaH2uKhnARfBzs_vH5to",
-          "rule": "pythonsecurity:S2083",
-          "component": "storytold_photocraft:scripts/ci-test-times.py",
-          "type": "VULNERABILITY",
-          "severity": "BLOCKER",
-          "hash": "49be67b6e92adfd1925fe265def3f32f"
-        },
-        {
           "key": "AaH2uKhnARfBzs_vH5tp",
           "rule": "pythonsecurity:S8705",
           "component": "storytold_photocraft:scripts/ci-test-times.py",
