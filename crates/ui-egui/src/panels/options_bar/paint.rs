@@ -113,10 +113,10 @@ fn paint_values(app: &PhotocraftApp, tool: Tool, b: &BrushSettings) -> PaintValu
         PaintMode::Blend(b.mode)
     };
     let mut v = PaintValues::new(mode);
-    v.opacity = f64::from(b.opacity);
-    v.flow = f64::from(b.flow);
+    v.opacity = fraction(b.opacity);
+    v.flow = fraction(b.flow);
     let mut smoothing = Smoothing::default();
-    smoothing.amount = f64::from(b.smoothing.amount);
+    smoothing.amount = fraction(b.smoothing.amount);
     smoothing.pulled_string = b.smoothing.pulled_string;
     smoothing.catch_up = b.smoothing.catch_up;
     smoothing.catch_up_on_end = b.smoothing.catch_up_on_end;
@@ -130,16 +130,24 @@ fn paint_values(app: &PhotocraftApp, tool: Tool, b: &BrushSettings) -> PaintValu
     let mut mixer = MixerValues::default();
     mixer.load_after_stroke = b.mixer.load_after_stroke;
     mixer.clean_after_stroke = b.mixer.clean_after_stroke;
-    mixer.wet = f64::from(b.mixer.wet);
-    mixer.load = f64::from(b.mixer.load);
-    mixer.mix = f64::from(b.mixer.mix);
-    mixer.flow = f64::from(b.mixer.flow);
+    mixer.wet = fraction(b.mixer.wet);
+    mixer.load = fraction(b.mixer.load);
+    mixer.mix = fraction(b.mixer.mix);
+    mixer.flow = fraction(b.mixer.flow);
     mixer.sample_all_layers = b.mixer.sample_all_layers;
     mixer.combination = o.mixer_combination;
     mixer.current_load = mixer_load(app);
     mixer.solid_colors_only = b.mixer.solid_colors_only;
     v.mixer = mixer;
     v
+}
+
+/// A fraction the brush keeps as `f32`, read without its float noise. 0.51 as `f32` reads back as
+/// 0.50999999..., which the bar's whole-percent fields take for a value off their step grid, so Up
+/// stepped it to 51 again and only the first press moved the value (#16806). Six decimals keep every
+/// value the fields can set (a tenth of a percent at the finest).
+fn fraction(x: f32) -> f64 {
+    (f64::from(x) * 1e6).round() / 1e6
 }
 
 /// What the Mixer Brush holds, as the Current Brush Load swatch shows it: the sampled tip image of an Alt-click while
