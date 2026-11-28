@@ -420,3 +420,6 @@ mod smoothing_catch_up_default_tests;
 
 #[cfg(test)]
 mod brush_noise_strength_tests;
+
+#[cfg(test)]
+mod brush_size_fade_end_tests;
